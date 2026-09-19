@@ -3,6 +3,7 @@ package com.redtourism.controller;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.redtourism.common.Constants;
 import com.redtourism.common.Result;
+import com.redtourism.common.SessionUtils;
 import com.redtourism.entity.Message;
 import com.redtourism.entity.User;
 import com.redtourism.service.MessageService;
@@ -23,21 +24,22 @@ public class MessageController {
                                         @RequestParam(defaultValue = "10") int size,
                                         @RequestParam(required = false) Integer isRead,
                                         HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         return Result.success(messageService.listMessages(page, size, user.getId(), isRead));
     }
 
+    /** 只能标记属于当前登录用户自己的消息，防止越权改动他人数据 */
     @GetMapping("/read")
-    public Result<String> markRead(@RequestParam Long id) {
-        messageService.markRead(id);
+    public Result<String> markRead(@RequestParam Long id, HttpSession session) {
+        User user = SessionUtils.requireUser(session);
+        boolean ok = messageService.markRead(id, user.getId());
+        if (!ok) return Result.error("消息不存在或无权操作");
         return Result.success("已读", null);
     }
 
     @GetMapping("/readAll")
     public Result<String> markAllRead(HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         messageService.markAllRead(user.getId());
         return Result.success("全部已读", null);
     }

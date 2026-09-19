@@ -118,10 +118,10 @@ async function load() {
     const status = document.getElementById('statusFilter').value;
     const category = document.getElementById('catFilter').value;
     const kw = document.getElementById('kw').value.trim();
-    const data = await api(`/api/feedback/admin/list?page=${currentPage}&size=15&status=${encodeURIComponent(status)}&category=${encodeURIComponent(category)}&keyword=${encodeURIComponent(kw)}`);
+    const data = await api(`/api/admin/feedback/list?page=${currentPage}&size=15&status=${encodeURIComponent(status)}&category=${encodeURIComponent(category)}&keyword=${encodeURIComponent(kw)}`);
     if (!data) return;
 
-    const cnt = await api('/api/feedback/admin/pendingCount');
+    const cnt = await api('/api/admin/feedback/pendingCount');
     const badge = document.getElementById('pendingBadge');
     if (cnt > 0) { badge.textContent = cnt; badge.style.display = 'inline'; } else badge.style.display = 'none';
 
@@ -171,12 +171,12 @@ async function doReply() {
     const reply = document.getElementById('replyText').value.trim();
     const status = document.getElementById('replyStatus').value;
     if (!reply) { showToast('请输入回复内容','error'); return; }
-    const res = await api(`/api/feedback/admin/reply?id=${id}&reply=${encodeURIComponent(reply)}&status=${status}`);
+    const res = await api(`/api/admin/feedback/reply?id=${id}&reply=${encodeURIComponent(reply)}&status=${status}`);
     if (res) { closeReply(); showToast('回复成功'); load(); }
 }
 async function delFb(id) {
     showConfirm('确定删除该反馈？', async () => {
-        const res = await api(`/api/feedback/admin/delete?id=${id}`);
+        const res = await api(`/api/admin/feedback/delete?id=${id}`);
         if (res) { showToast('已删除'); load(); }
     });
 }

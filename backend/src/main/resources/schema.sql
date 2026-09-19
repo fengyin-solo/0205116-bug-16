@@ -310,3 +310,21 @@ CREATE TABLE IF NOT EXISTS feedback (
     INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 管理端操作审计日志
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    operator_id BIGINT COMMENT '操作人ID',
+    operator_name VARCHAR(50) COMMENT '操作人用户名',
+    operator_role VARCHAR(20) COMMENT '操作时角色快照',
+    module VARCHAR(30) NOT NULL COMMENT '业务模块',
+    action VARCHAR(30) NOT NULL COMMENT '动作',
+    target VARCHAR(500) COMMENT '操作目标',
+    result VARCHAR(20) NOT NULL COMMENT 'SUCCESS/DENIED',
+    detail VARCHAR(1000) COMMENT '详情或拒绝原因',
+    ip VARCHAR(64),
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_operator (operator_id),
+    INDEX idx_module_time (module, create_time),
+    INDEX idx_create_time (create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+

@@ -26,14 +26,13 @@ public class ScenicSpotServiceImpl extends ServiceImpl<ScenicSpotMapper, ScenicS
     public IPage<ScenicSpot> listSpots(int page, int size, String region, String theme,
                                         Integer status, String keyword, String orderBy) {
         LambdaQueryWrapper<ScenicSpot> wrapper = new LambdaQueryWrapper<>();
+        // 公开端列表只展示上架景点；下架内容无论传什么 status 都不会出现在公开列表
+        wrapper.eq(ScenicSpot::getStatus, 1);
         if (StringUtils.hasText(region)) {
             wrapper.eq(ScenicSpot::getRegion, region);
         }
         if (StringUtils.hasText(theme)) {
             wrapper.eq(ScenicSpot::getTheme, theme);
-        }
-        if (status != null) {
-            wrapper.eq(ScenicSpot::getStatus, status);
         }
         if (StringUtils.hasText(keyword)) {
             wrapper.and(w -> w.like(ScenicSpot::getName, keyword)
@@ -57,10 +56,12 @@ public class ScenicSpotServiceImpl extends ServiceImpl<ScenicSpotMapper, ScenicS
     @Override
     public ScenicSpot getDetail(Long id) {
         ScenicSpot spot = getById(id);
-        if (spot != null) {
-            spot.setViewCount(spot.getViewCount() == null ? 1L : spot.getViewCount() + 1);
-            updateById(spot);
+        // 与公开列表口径一致：已下架的景点不对外返回（管理端列表走 AdminController，不受影响）
+        if (spot == null || spot.getStatus() == null || spot.getStatus() != 1) {
+            return null;
         }
+        spot.setViewCount(spot.getViewCount() == null ? 1L : spot.getViewCount() + 1);
+        updateById(spot);
         return spot;
     }
 

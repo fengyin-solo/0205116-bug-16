@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.redtourism.common.Constants;
 import com.redtourism.common.Result;
+import com.redtourism.common.SessionUtils;
 import com.redtourism.entity.*;
 import com.redtourism.service.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,15 +14,23 @@ import org.springframework.web.bind.annotation.*;
 import com.redtourism.mapper.UserCustomRouteMapper;
 import com.redtourism.mapper.ScenicSpotImageMapper;
 import com.redtourism.mapper.UserMapper;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
 import java.io.PrintWriter;
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
+/**
+ * 管理端接口。路径级鉴权（/api/admin/** 仅 ADMIN，spot/dashboard 允许 STAFF）
+ * 由 SecurityConfig 统一完成，这里只处理业务规则，并用审计日志记录处理人。
+ */
 @RestController
 @RequestMapping("/api/admin")
 public class AdminController {
@@ -47,6 +56,8 @@ public class AdminController {
     @Autowired
     private FaqService faqService;
     @Autowired
+    private AuditLogService auditLogService;
+    @Autowired
     private UserCustomRouteMapper customRouteMapper;
     @Autowired
     private UserMapper userMapper;
@@ -65,18 +76,39 @@ public class AdminController {
                                          @RequestParam(required = false) String role,
                                          @RequestParam(required = false) Integer status,
                                          @RequestParam(required = false) String keyword) {
-        return Result.success(userService.listUsers(page, size, role, status, keyword));
+        IPage<User> result = userService.listUsers(page, size, role, status, keyword);
+        // 列表口径与详情一致：任何时候都不对外返回密码
+        result.getRecords().forEach(u -> u.setPassword(null));
+        return Result.success(result);
     }
 
     @GetMapping("/user/toggleStatus")
-    public Result<String> toggleUserStatus(@RequestParam Long id) {
+    public Result<String> toggleUserStatus(@RequestParam Long id,
+                                           HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        User target = userService.getById(id);
+        if (target == null) return Result.error("用户不存在");
+        if (target.getId().equals(operator.getId())) {
+            return Result.error("不能禁用当前登录账号");
+        }
         userService.toggleStatus(id);
+        audit(operator, "USER", "TOGGLE_STATUS", "userId=" + id,
+                "账号状态切换为 " + (target.getStatus() == Constants.STATUS_ENABLED ? "禁用" : "正常"), request);
         return Result.success("操作成功", null);
     }
 
     @GetMapping("/user/delete")
-    public Result<String> deleteUser(@RequestParam Long id) {
+    public Result<String> deleteUser(@RequestParam Long id,
+                                     HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        User target = userService.getById(id);
+        if (target == null) return Result.error("用户不存在");
+        if (target.getId().equals(operator.getId())) {
+            return Result.error("不能删除当前登录账号");
+        }
         userService.removeById(id);
+        audit(operator, "USER", "DELETE", "userId=" + id,
+                "删除用户 " + target.getUsername(), request);
         return Result.success("删除成功", null);
     }
 
@@ -86,7 +118,14 @@ public class AdminController {
                                     @RequestParam(required = false) String nickname,
                                     @RequestParam(required = false) String phone,
                                     @RequestParam(required = false) String password,
-                                    @RequestParam(required = false, defaultValue = "USER") String role) {
+                                    @RequestParam(required = false, defaultValue = "USER") String role,
+                                    HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        if (!isAllowedRole(role)) {
+            auditLogService.log(operator, "USER", "SAVE", "username=" + username,
+                    "DENIED", "非法角色参数: " + role, request);
+            return Result.error("非法角色");
+        }
         User user;
         if (id != null) {
             user = userService.getById(id);
@@ -102,15 +141,24 @@ public class AdminController {
         if (password != null && !password.isEmpty()) user.setPassword(password);
         user.setRole(role);
         userService.saveOrUpdate(user);
+        audit(operator, "USER", "SAVE", "userId=" + user.getId(),
+                (id == null ? "新建用户 " : "修改用户 ") + username + "，角色=" + role, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/user/resetPassword")
-    public Result<String> adminResetPassword(@RequestParam Long id, @RequestParam String newPassword) {
+    public Result<String> adminResetPassword(@RequestParam Long id, @RequestParam String newPassword,
+                                             HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         User user = userService.getById(id);
         if (user == null) return Result.error("用户不存在");
+        if (newPassword == null || newPassword.length() < 6) {
+            return Result.error("新密码长度不能少于6位");
+        }
         user.setPassword(newPassword);
         userService.updateById(user);
+        audit(operator, "USER", "RESET_PASSWORD", "userId=" + id,
+                "重置用户 " + user.getUsername() + " 的密码", request);
         return Result.success("密码已重置", null);
     }
 
@@ -119,7 +167,7 @@ public class AdminController {
         response.setContentType("text/csv;charset=UTF-8");
         response.setHeader("Content-Disposition", "attachment;filename=users.csv");
         PrintWriter writer = response.getWriter();
-        writer.write("\uFEFF");
+        writer.write("﻿");
         writer.println("ID,用户名,昵称,手机号,角色,状态,注册时间");
         List<User> users = userService.list();
         for (User u : users) {
@@ -131,6 +179,12 @@ public class AdminController {
                 u.getCreateTime() != null ? u.getCreateTime().toString() : ""));
         }
         writer.flush();
+    }
+
+    private boolean isAllowedRole(String role) {
+        return Constants.ROLE_USER.equals(role)
+                || Constants.ROLE_ADMIN.equals(role)
+                || Constants.ROLE_STAFF.equals(role);
     }
 
     private String csvSafe(String s) {
@@ -146,8 +200,7 @@ public class AdminController {
     public Result<IPage<ScenicSpot>> spotList(@RequestParam(defaultValue = "1") int page,
                                                @RequestParam(defaultValue = "10") int size,
                                                HttpSession session) {
-        User operator = (User) session.getAttribute(Constants.SESSION_USER);
-        if (operator == null) return Result.error(401, "请先登录");
+        User operator = requireStaffOrAdmin(session);
         LambdaQueryWrapper<ScenicSpot> w = new LambdaQueryWrapper<>();
         if (isStaff(operator)) {
             w.eq(ScenicSpot::getStaffId, operator.getId());
@@ -175,9 +228,8 @@ public class AdminController {
                                     @RequestParam(required = false) String ticketReservation,
                                     @RequestParam(required = false) String suggestedDuration,
                                     @RequestParam(required = false) String itemsToBring,
-                                    HttpSession session) {
-        User operator = (User) session.getAttribute(Constants.SESSION_USER);
-        if (operator == null) return Result.error(401, "请先登录");
+                                    HttpSession session, HttpServletRequest request) {
+        User operator = requireStaffOrAdmin(session);
         ScenicSpot spot = id != null ? spotService.getById(id) : new ScenicSpot();
         if (spot == null) spot = new ScenicSpot();
         if (id != null && !canOperateSpot(operator, spot)) {
@@ -213,29 +265,35 @@ public class AdminController {
             spot.setStaffId(operator.getId());
         }
         spotService.saveOrUpdate(spot);
+        audit(operator, "SPOT", "SAVE", "spotId=" + spot.getId(),
+                (id == null ? "新建景点 " : "修改景点 ") + name, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/spot/delete")
-    public Result<String> deleteSpot(@RequestParam Long id, HttpSession session) {
-        User operator = (User) session.getAttribute(Constants.SESSION_USER);
-        if (operator == null) return Result.error(401, "请先登录");
+    public Result<String> deleteSpot(@RequestParam Long id, HttpSession session,
+                                     HttpServletRequest request) {
+        User operator = requireStaffOrAdmin(session);
         ScenicSpot spot = spotService.getById(id);
         if (spot == null) return Result.error("景点不存在");
         if (!canOperateSpot(operator, spot)) return Result.error("无权操作该景点");
         spotService.removeById(id);
+        audit(operator, "SPOT", "DELETE", "spotId=" + id,
+                "删除景点 " + spot.getName(), request);
         return Result.success("删除成功", null);
     }
 
     @GetMapping("/spot/toggleStatus")
-    public Result<String> toggleSpotStatus(@RequestParam Long id, HttpSession session) {
-        User operator = (User) session.getAttribute(Constants.SESSION_USER);
-        if (operator == null) return Result.error(401, "请先登录");
+    public Result<String> toggleSpotStatus(@RequestParam Long id, HttpSession session,
+                                           HttpServletRequest request) {
+        User operator = requireStaffOrAdmin(session);
         ScenicSpot spot = spotService.getById(id);
         if (spot == null) return Result.error("景点不存在");
         if (!canOperateSpot(operator, spot)) return Result.error("无权操作该景点");
         spot.setStatus(spot.getStatus() == 1 ? 0 : 1);
         spotService.updateById(spot);
+        audit(operator, "SPOT", "TOGGLE_STATUS", "spotId=" + id,
+                "景点[" + spot.getName() + "]状态改为" + (spot.getStatus() == 1 ? "上架" : "下架"), request);
         return Result.success("状态已更新", null);
     }
 
@@ -243,31 +301,34 @@ public class AdminController {
     public Result<String> addSpotImage(@RequestParam Long spotId,
                                         @RequestParam String imageUrl,
                                         @RequestParam(required = false) Integer sortOrder,
-                                        HttpSession session) {
-        User operator = (User) session.getAttribute(Constants.SESSION_USER);
-        if (operator == null) return Result.error(401, "请先登录");
+                                        HttpSession session, HttpServletRequest request) {
+        User operator = requireStaffOrAdmin(session);
         ScenicSpot spot = spotService.getById(spotId);
         if (spot == null) return Result.error("景点不存在");
         if (!canOperateSpot(operator, spot)) return Result.error("无权操作该景点");
         spotService.addImage(spotId, imageUrl, sortOrder);
+        audit(operator, "SPOT", "ADD_IMAGE", "spotId=" + spotId, imageUrl, request);
         return Result.success("图片添加成功", null);
     }
 
     @GetMapping("/spot/deleteImage")
-    public Result<String> deleteSpotImage(@RequestParam Long imageId, HttpSession session) {
-        User operator = (User) session.getAttribute(Constants.SESSION_USER);
-        if (operator == null) return Result.error(401, "请先登录");
+    public Result<String> deleteSpotImage(@RequestParam Long imageId, HttpSession session,
+                                          HttpServletRequest request) {
+        User operator = requireStaffOrAdmin(session);
         ScenicSpotImage image = spotImageMapper.selectById(imageId);
         if (image == null) return Result.error("图片不存在");
         ScenicSpot spot = spotService.getById(image.getSpotId());
         if (spot == null) return Result.error("景点不存在");
         if (!canOperateSpot(operator, spot)) return Result.error("无权操作该景点");
         spotService.deleteImage(imageId);
+        audit(operator, "SPOT", "DELETE_IMAGE", "imageId=" + imageId,
+                "spotId=" + image.getSpotId(), request);
         return Result.success("图片删除成功", null);
     }
 
     @GetMapping("/spot/stats")
-    public Result<Map<String, Object>> spotStats(@RequestParam Long id) {
+    public Result<Map<String, Object>> spotStats(@RequestParam Long id, HttpSession session) {
+        requireStaffOrAdmin(session);
         ScenicSpot spot = spotService.getById(id);
         Map<String, Object> stats = new HashMap<>();
         if (spot != null) {
@@ -283,13 +344,9 @@ public class AdminController {
         return operator != null && Constants.ROLE_STAFF.equals(operator.getRole());
     }
 
-    private boolean isAdmin(User operator) {
-        return operator != null && Constants.ROLE_ADMIN.equals(operator.getRole());
-    }
-
     private boolean canOperateSpot(User operator, ScenicSpot spot) {
         if (operator == null || spot == null) return false;
-        if (isAdmin(operator)) return true;
+        if (Constants.ROLE_ADMIN.equals(operator.getRole())) return true;
         return isStaff(operator) && spot.getStaffId() != null && spot.getStaffId().equals(operator.getId());
     }
 
@@ -304,7 +361,9 @@ public class AdminController {
                                      @RequestParam(required = false) String coverImage,
                                      @RequestParam(required = false) String trafficSuggestion,
                                      @RequestParam(required = false) String hotelSuggestion,
-                                     @RequestParam(required = false) BigDecimal budget) {
+                                     @RequestParam(required = false) BigDecimal budget,
+                                     HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         Route route = id != null ? routeService.getById(id) : new Route();
         if (route == null) route = new Route();
         route.setName(name);
@@ -320,12 +379,19 @@ public class AdminController {
             route.setFavoriteCount(0L);
         }
         routeService.saveOrUpdate(route);
+        audit(operator, "ROUTE", "SAVE", "routeId=" + route.getId(),
+                (id == null ? "新建线路 " : "修改线路 ") + name, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/route/delete")
-    public Result<String> deleteRoute(@RequestParam Long id) {
+    public Result<String> deleteRoute(@RequestParam Long id,
+                                      HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        Route route = routeService.getById(id);
         routeService.removeById(id);
+        audit(operator, "ROUTE", "DELETE", "routeId=" + id,
+                route != null ? "删除线路 " + route.getName() : null, request);
         return Result.success("删除成功", null);
     }
 
@@ -337,7 +403,9 @@ public class AdminController {
                                        @RequestParam(required = false) String content,
                                        @RequestParam(required = false) Long categoryId,
                                        @RequestParam(required = false) String coverImage,
-                                       @RequestParam(required = false) String author) {
+                                       @RequestParam(required = false) String author,
+                                       HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         CultureContent culture = id != null ? cultureService.getById(id) : new CultureContent();
         if (culture == null) culture = new CultureContent();
         culture.setTitle(title);
@@ -351,12 +419,19 @@ public class AdminController {
             culture.setLikeCount(0L);
         }
         cultureService.saveOrUpdate(culture);
+        audit(operator, "CULTURE", "SAVE", "cultureId=" + culture.getId(),
+                (id == null ? "新建文化内容 " : "修改文化内容 ") + title, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/culture/delete")
-    public Result<String> deleteCulture(@RequestParam Long id) {
+    public Result<String> deleteCulture(@RequestParam Long id,
+                                        HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        CultureContent culture = cultureService.getById(id);
         cultureService.removeById(id);
+        audit(operator, "CULTURE", "DELETE", "cultureId=" + id,
+                culture != null ? "删除文化内容 " + culture.getTitle() : null, request);
         return Result.success("删除成功", null);
     }
 
@@ -364,19 +439,25 @@ public class AdminController {
     public Result<String> saveCultureCategory(@RequestParam(required = false) Long id,
                                                @RequestParam String name,
                                                @RequestParam(required = false, defaultValue = "0") Long parentId,
-                                               @RequestParam(required = false, defaultValue = "0") Integer sortOrder) {
+                                               @RequestParam(required = false, defaultValue = "0") Integer sortOrder,
+                                               HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         CultureCategory cat = new CultureCategory();
         cat.setId(id);
         cat.setName(name);
         cat.setParentId(parentId);
         cat.setSortOrder(sortOrder);
         cultureService.saveCategory(cat);
+        audit(operator, "CULTURE", "SAVE_CATEGORY", "categoryId=" + id, "保存分类 " + name, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/culture/deleteCategory")
-    public Result<String> deleteCultureCategory(@RequestParam Long id) {
+    public Result<String> deleteCultureCategory(@RequestParam Long id,
+                                                HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         cultureService.deleteCategory(id);
+        audit(operator, "CULTURE", "DELETE_CATEGORY", "categoryId=" + id, null, request);
         return Result.success("删除成功", null);
     }
 
@@ -393,7 +474,9 @@ public class AdminController {
                                      @RequestParam(required = false) Integer hasRoomService,
                                      @RequestParam(required = false) String phone,
                                      @RequestParam(required = false) Double longitude,
-                                     @RequestParam(required = false) Double latitude) {
+                                     @RequestParam(required = false) Double latitude,
+                                     HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         Hotel hotel = id != null ? hotelService.getById(id) : new Hotel();
         if (hotel == null) hotel = new Hotel();
         hotel.setName(name);
@@ -411,12 +494,19 @@ public class AdminController {
             hotel.setRating(0.0);
         }
         hotelService.saveOrUpdate(hotel);
+        audit(operator, "HOTEL", "SAVE", "hotelId=" + hotel.getId(),
+                (id == null ? "新建酒店 " : "修改酒店 ") + name, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/hotel/delete")
-    public Result<String> deleteHotel(@RequestParam Long id) {
+    public Result<String> deleteHotel(@RequestParam Long id,
+                                      HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        Hotel hotel = hotelService.getById(id);
         hotelService.removeById(id);
+        audit(operator, "HOTEL", "DELETE", "hotelId=" + id,
+                hotel != null ? "删除酒店 " + hotel.getName() : null, request);
         return Result.success("删除成功", null);
     }
 
@@ -429,7 +519,9 @@ public class AdminController {
                                     @RequestParam(required = false) String category,
                                     @RequestParam(required = false) BigDecimal price,
                                     @RequestParam(required = false) String coverImage,
-                                    @RequestParam(required = false) Long storeId) {
+                                    @RequestParam(required = false) Long storeId,
+                                    HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         Food food = id != null ? foodService.getById(id) : new Food();
         if (food == null) food = new Food();
         food.setName(name);
@@ -439,12 +531,19 @@ public class AdminController {
         if (coverImage != null) food.setCoverImage(coverImage);
         if (storeId != null) food.setStoreId(storeId);
         foodService.saveOrUpdate(food);
+        audit(operator, "FOOD", "SAVE", "foodId=" + food.getId(),
+                (id == null ? "新建美食 " : "修改美食 ") + name, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/food/delete")
-    public Result<String> deleteFood(@RequestParam Long id) {
+    public Result<String> deleteFood(@RequestParam Long id,
+                                     HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        Food food = foodService.getById(id);
         foodService.removeById(id);
+        audit(operator, "FOOD", "DELETE", "foodId=" + id,
+                food != null ? "删除美食 " + food.getName() : null, request);
         return Result.success("删除成功", null);
     }
 
@@ -457,7 +556,9 @@ public class AdminController {
                                          @RequestParam(required = false) String phone,
                                          @RequestParam(required = false) String coverImage,
                                          @RequestParam(required = false) Double longitude,
-                                         @RequestParam(required = false) Double latitude) {
+                                         @RequestParam(required = false) Double latitude,
+                                         HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         FoodStore store = new FoodStore();
         store.setId(id);
         store.setName(name);
@@ -469,12 +570,16 @@ public class AdminController {
         if (longitude != null) store.setLongitude(longitude);
         if (latitude != null) store.setLatitude(latitude);
         foodService.saveStore(store);
+        audit(operator, "FOOD", "SAVE_STORE", "storeId=" + id, "保存门店 " + name, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/food/deleteStore")
-    public Result<String> deleteFoodStore(@RequestParam Long id) {
+    public Result<String> deleteFoodStore(@RequestParam Long id,
+                                          HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         foodService.deleteStore(id);
+        audit(operator, "FOOD", "DELETE_STORE", "storeId=" + id, null, request);
         return Result.success("删除成功", null);
     }
 
@@ -490,24 +595,40 @@ public class AdminController {
     @GetMapping("/comment/reply")
     public Result<String> replyComment(@RequestParam Long id,
                                         @RequestParam String replyContent,
-                                        HttpSession session) {
-        User admin = (User) session.getAttribute(Constants.SESSION_USER);
+                                        HttpSession session, HttpServletRequest request) {
+        User admin = requireAdmin(session);
         Comment comment = interactionService.getCommentById(id);
-        interactionService.replyComment(id, replyContent, admin != null ? admin.getId() : null);
-        if (comment != null && comment.getUserId() != null) {
+        if (comment == null) return Result.error("留言不存在");
+        interactionService.replyComment(id, replyContent, admin.getId());
+        if (comment.getUserId() != null) {
             messageService.sendMessage(comment.getUserId(), "您的留言收到了回复",
                     "管理员回复了您的留言：" + replyContent);
         }
+        audit(admin, "COMMENT", "REPLY", "commentId=" + id, null, request);
         return Result.success("回复成功", null);
     }
 
     @GetMapping("/comment/delete")
-    public Result<String> deleteComment(@RequestParam Long id) {
+    public Result<String> deleteComment(@RequestParam Long id,
+                                        HttpSession session, HttpServletRequest request) {
+        User admin = requireAdmin(session);
+        Comment comment = interactionService.getCommentById(id);
+        if (comment == null) return Result.error("留言不存在");
         interactionService.deleteComment(id);
+        audit(admin, "COMMENT", "DELETE", "commentId=" + id,
+                "删除留言：" + comment.getContent(), request);
         return Result.success("删除成功", null);
     }
 
     // ==================== 订单管理 ====================
+
+    /** 管理端订单允许的状态流转 */
+    private static final Map<String, Set<String>> ORDER_TRANSITIONS = new HashMap<>();
+    static {
+        ORDER_TRANSITIONS.put("CANCELLED", new HashSet<>(Arrays.asList("PENDING")));
+        ORDER_TRANSITIONS.put("COMPLETED", new HashSet<>(Arrays.asList("PAID")));
+        ORDER_TRANSITIONS.put("REFUNDED", new HashSet<>(Arrays.asList("PAID", "COMPLETED")));
+    }
 
     @GetMapping("/order/list")
     public Result<IPage<OrderInfo>> orderList(@RequestParam(defaultValue = "1") int page,
@@ -518,35 +639,53 @@ public class AdminController {
     }
 
     @GetMapping("/order/cancel")
-    public Result<String> adminCancelOrder(@RequestParam Long orderId) {
-        OrderInfo order = orderService.getById(orderId);
-        if (order == null) return Result.error("订单不存在");
-        order.setStatus("CANCELLED");
-        orderService.updateById(order);
-        return Result.success("已取消");
+    public Result<String> adminCancelOrder(@RequestParam Long orderId,
+                                           HttpSession session, HttpServletRequest request) {
+        return changeOrderStatus(orderId, "CANCELLED", "取消", session, request);
     }
 
     @GetMapping("/order/refund")
-    public Result<String> adminRefundOrder(@RequestParam Long orderId) {
-        OrderInfo order = orderService.getById(orderId);
-        if (order == null) return Result.error("订单不存在");
-        order.setStatus("REFUNDED");
-        orderService.updateById(order);
-        return Result.success("已退款");
+    public Result<String> adminRefundOrder(@RequestParam Long orderId,
+                                           HttpSession session, HttpServletRequest request) {
+        return changeOrderStatus(orderId, "REFUNDED", "退款", session, request);
     }
 
     @GetMapping("/order/complete")
-    public Result<String> adminCompleteOrder(@RequestParam Long orderId) {
+    public Result<String> adminCompleteOrder(@RequestParam Long orderId,
+                                             HttpSession session, HttpServletRequest request) {
+        return changeOrderStatus(orderId, "COMPLETED", "完成", session, request);
+    }
+
+    private Result<String> changeOrderStatus(Long orderId, String targetStatus, String actionText,
+                                             HttpSession session, HttpServletRequest request) {
+        User admin = requireAdmin(session);
         OrderInfo order = orderService.getById(orderId);
         if (order == null) return Result.error("订单不存在");
-        order.setStatus("COMPLETED");
+        Set<String> allowedFrom = ORDER_TRANSITIONS.get(targetStatus);
+        if (allowedFrom == null || !allowedFrom.contains(order.getStatus())) {
+            auditLogService.log(admin, "ORDER", targetStatus, "orderId=" + orderId,
+                    "DENIED", "当前状态 " + order.getStatus() + " 不允许" + actionText, request);
+            return Result.error("当前订单状态不可" + actionText);
+        }
+        order.setStatus(targetStatus);
+        if ("REFUNDED".equals(targetStatus) || "COMPLETED".equals(targetStatus)) {
+            order.setPayTime(order.getPayTime() != null ? order.getPayTime() : new Date());
+        }
         orderService.updateById(order);
-        return Result.success("已完成");
+        audit(admin, "ORDER", targetStatus, "orderId=" + orderId,
+                "订单 " + order.getOrderNo() + " 状态 " + order.getStatus() + " -> " + targetStatus, request);
+        return Result.success("已" + actionText);
     }
 
     @GetMapping("/order/delete")
-    public Result<String> adminDeleteOrder(@RequestParam Long orderId) {
+    public Result<String> adminDeleteOrder(@RequestParam Long orderId,
+                                           HttpSession session, HttpServletRequest request) {
+        User admin = requireAdmin(session);
+        OrderInfo order = orderService.getById(orderId);
+        if (order == null) return Result.error("订单不存在");
         orderService.removeById(orderId);
+        audit(admin, "ORDER", "DELETE", "orderId=" + orderId,
+                "删除订单 " + order.getOrderNo(), request);
         return Result.success("已删除");
     }
 
@@ -556,19 +695,27 @@ public class AdminController {
     public Result<String> saveFaq(@RequestParam(required = false) Long id,
                                    @RequestParam String question,
                                    @RequestParam String answer,
-                                   @RequestParam(required = false, defaultValue = "0") Integer sortOrder) {
+                                   @RequestParam(required = false, defaultValue = "0") Integer sortOrder,
+                                   HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         Faq faq = new Faq();
         faq.setId(id);
         faq.setQuestion(question);
         faq.setAnswer(answer);
         faq.setSortOrder(sortOrder);
         faqService.saveOrUpdate(faq);
+        audit(operator, "FAQ", "SAVE", "faqId=" + id, question, request);
         return Result.success("保存成功", null);
     }
 
     @GetMapping("/faq/delete")
-    public Result<String> deleteFaq(@RequestParam Long id) {
+    public Result<String> deleteFaq(@RequestParam Long id,
+                                    HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
+        Faq faq = faqService.getById(id);
         faqService.removeById(id);
+        audit(operator, "FAQ", "DELETE", "faqId=" + id,
+                faq != null ? faq.getQuestion() : null, request);
         return Result.success("删除成功", null);
     }
 
@@ -577,8 +724,11 @@ public class AdminController {
     @GetMapping("/message/send")
     public Result<String> sendMessage(@RequestParam Long userId,
                                        @RequestParam String title,
-                                       @RequestParam String content) {
+                                       @RequestParam String content,
+                                       HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         messageService.sendMessage(userId, title, content);
+        audit(operator, "MESSAGE", "SEND", "userId=" + userId, title, request);
         return Result.success("发送成功", null);
     }
 
@@ -604,18 +754,23 @@ public class AdminController {
     }
 
     @GetMapping("/customRoute/approve")
-    public Result<String> approveCustomRoute(@RequestParam Long id) {
+    public Result<String> approveCustomRoute(@RequestParam Long id,
+                                             HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         UserCustomRoute route = customRouteMapper.selectById(id);
         if (route == null) return Result.error("线路不存在");
         route.setStatus("APPROVED");
         customRouteMapper.updateById(route);
         messageService.sendMessage(route.getUserId(), "您的自定义线路已被采纳为官方推荐",
                 "恭喜！您创建的线路【" + route.getName() + "】已通过审核，被纳入官方推荐线路。");
+        audit(operator, "CUSTOM_ROUTE", "APPROVE", "routeId=" + id, route.getName(), request);
         return Result.success("已通过", null);
     }
 
     @GetMapping("/customRoute/reject")
-    public Result<String> rejectCustomRoute(@RequestParam Long id, @RequestParam String reason) {
+    public Result<String> rejectCustomRoute(@RequestParam Long id, @RequestParam String reason,
+                                            HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         UserCustomRoute route = customRouteMapper.selectById(id);
         if (route == null) return Result.error("线路不存在");
         route.setStatus("REJECTED");
@@ -623,6 +778,8 @@ public class AdminController {
         customRouteMapper.updateById(route);
         messageService.sendMessage(route.getUserId(), "您的自定义线路未通过审核",
                 "您提交的线路【" + route.getName() + "】未通过审核。原因：" + reason);
+        audit(operator, "CUSTOM_ROUTE", "REJECT", "routeId=" + id,
+                route.getName() + "，原因：" + reason, request);
         return Result.success("已驳回", null);
     }
 
@@ -656,7 +813,9 @@ public class AdminController {
     }
 
     @GetMapping("/spotSuggestion/approve")
-    public Result<String> approveSpotSuggestion(@RequestParam Long id) {
+    public Result<String> approveSpotSuggestion(@RequestParam Long id,
+                                                HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         SpotSuggestion s = spotSuggestionMapper.selectById(id);
         if (s == null) return Result.error("不存在");
         s.setStatus("APPROVED");
@@ -673,16 +832,21 @@ public class AdminController {
                 case "ticketReservation": spot.setTicketReservation(s.getNewValue()); break;
                 case "suggestedDuration": spot.setSuggestedDuration(s.getNewValue()); break;
                 case "itemsToBring": spot.setItemsToBring(s.getNewValue()); break;
+                default: break;
             }
             spotService.updateById(spot);
         }
         messageService.sendMessage(s.getUserId(), "您的景点更正建议已通过",
                 "您提交的关于【" + s.getSpotName() + "】" + s.getFieldName() + "的更正已被采纳，感谢您的贡献！");
+        audit(operator, "SPOT_SUGGESTION", "APPROVE", "suggestionId=" + id,
+                s.getSpotName() + "/" + s.getFieldName(), request);
         return Result.success("已通过并应用", null);
     }
 
     @GetMapping("/spotSuggestion/reject")
-    public Result<String> rejectSpotSuggestion(@RequestParam Long id, @RequestParam String reason) {
+    public Result<String> rejectSpotSuggestion(@RequestParam Long id, @RequestParam String reason,
+                                               HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         SpotSuggestion s = spotSuggestionMapper.selectById(id);
         if (s == null) return Result.error("不存在");
         s.setStatus("REJECTED");
@@ -690,6 +854,8 @@ public class AdminController {
         spotSuggestionMapper.updateById(s);
         messageService.sendMessage(s.getUserId(), "您的景点更正建议未通过",
                 "您提交的关于【" + s.getSpotName() + "】的更正未通过。原因：" + reason);
+        audit(operator, "SPOT_SUGGESTION", "REJECT", "suggestionId=" + id,
+                s.getSpotName() + "，原因：" + reason, request);
         return Result.success("已驳回", null);
     }
 
@@ -733,13 +899,16 @@ public class AdminController {
     }
 
     @GetMapping("/chat/send")
-    public Result<String> adminSendChat(@RequestParam Long userId, @RequestParam String content) {
+    public Result<String> adminSendChat(@RequestParam Long userId, @RequestParam String content,
+                                        HttpSession session, HttpServletRequest request) {
+        User operator = requireAdmin(session);
         ServiceChat c = new ServiceChat();
         c.setUserId(userId);
         c.setSender("ADMIN");
         c.setContent(content);
         c.setCreateTime(new Date());
         chatMapper.insert(c);
+        audit(operator, "CHAT", "SEND", "userId=" + userId, content, request);
         return Result.success("发送成功", null);
     }
 
@@ -756,5 +925,21 @@ public class AdminController {
         stats.put("foodCount", foodService.count());
         stats.put("orderCount", orderService.count());
         return Result.success(stats);
+    }
+
+    // ==================== 鉴权与审计辅助 ====================
+
+    /** 仅 ADMIN；非管理员（含访客/普通用户）统一返回明确提示。路径层已有拦截，这里做纵深防御 */
+    private User requireAdmin(HttpSession session) {
+        return SessionUtils.requireAdmin(session);
+    }
+
+    private User requireStaffOrAdmin(HttpSession session) {
+        return SessionUtils.requireStaffOrAdmin(session);
+    }
+
+    private void audit(User operator, String module, String action, String target,
+                       String detail, HttpServletRequest request) {
+        auditLogService.log(operator, module, action, target, "SUCCESS", detail, request);
     }
 }

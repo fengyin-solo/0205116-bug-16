@@ -29,4 +29,8 @@ public class OrderInfo implements Serializable {
     private Date createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private Date updateTime;
+
+    /** 下单人展示名，仅列表/详情展示用，不入库 */
+    @TableField(exist = false)
+    private String username;
 }

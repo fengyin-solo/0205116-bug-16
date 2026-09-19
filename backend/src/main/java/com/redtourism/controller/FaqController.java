@@ -20,6 +20,11 @@ public class FaqController {
         return Result.success(faqService.listAll());
     }
 
+    @GetMapping("/detail")
+    public Result<Faq> detail(@RequestParam Long id) {
+        return Result.success(faqService.getById(id));
+    }
+
     @GetMapping("/ask")
     public Result<String> ask(@RequestParam String question) {
         return Result.success(faqService.autoReply(question));

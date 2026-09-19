@@ -2,8 +2,10 @@ const API = (window.location.port === '8084' || window.location.port === '81') &
 
 async function api(path) {
     const res = await fetch(API + path, { credentials: 'include' });
-    const data = await res.json();
-    if (data.code === 401) { showToast('请先登录', 'error'); setTimeout(() => location.href = 'login.html', 1000); return null; }
+    let data;
+    try { data = await res.json(); } catch (e) { showToast('服务响应异常', 'error'); return null; }
+    if (data.code === 401) { showToast(data.msg || '请先登录', 'error'); setTimeout(() => location.href = 'login.html', 1000); return null; }
+    if (data.code === 403) { showToast(data.msg || '权限不足：仅管理员可执行该操作', 'error'); return null; }
     if (data.code !== 200) { showToast(data.msg || '操作失败', 'error'); return null; }
     return (data.data !== null && data.data !== undefined) ? data.data : true;
 }
@@ -92,6 +94,12 @@ function requireAdmin() {
         setTimeout(() => location.href = 'login.html', 800);
         return false;
     }
+    // 权限配置页仅 ADMIN 可进入；工作人员即使直接输入地址也会被拦下
+    if (location.pathname.split('/').pop() === 'permissions.html' && u.role !== 'ADMIN') {
+        showToast('权限不足：仅管理员可访问权限配置', 'error');
+        setTimeout(() => location.href = 'index.html', 1000);
+        return false;
+    }
     const nameEl = document.getElementById('adminName');
     if (nameEl) {
         const roleLabel = u.role === 'STAFF' ? '工作人员' : '管理员';
@@ -141,6 +149,8 @@ async function applyRoleMenuVisibility() {
         if (nav) nav.classList.remove('permission-pending');
         return;
     }
+    // 非管理员永不展示“权限配置”入口（角色配置仅 ADMIN 可改）
+    document.querySelectorAll('a[href="permissions.html"]').forEach(a => { a.style.display = 'none'; });
     const links = Array.from(document.querySelectorAll('.sidebar-nav a'));
     if (!links.length) {
         if (nav) nav.classList.remove('permission-pending');

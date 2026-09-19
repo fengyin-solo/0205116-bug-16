@@ -5,7 +5,8 @@ const API = (window.location.port === '8083' || window.location.port === '80' ||
 async function api(path) {
     const res = await fetch(API + path, { credentials: 'include' });
     const data = await res.json();
-    if (data.code === 401) { clearUser(); showToast('请先登录', 'error'); setTimeout(() => location.href = 'login.html', 1000); return null; }
+    if (data.code === 401) { clearUser(); showToast(data.msg || '请先登录', 'error'); setTimeout(() => location.href = 'login.html', 1000); return null; }
+    if (data.code === 403) { showToast(data.msg || '权限不足', 'error'); return null; }
     if (data.code !== 200) { showToast(data.msg || '请求失败', 'error'); return null; }
     return (data.data !== null && data.data !== undefined) ? data.data : true;
 }

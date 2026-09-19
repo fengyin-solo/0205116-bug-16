@@ -5,8 +5,11 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.redtourism.entity.OrderInfo;
+import com.redtourism.entity.User;
 import com.redtourism.mapper.OrderInfoMapper;
+import com.redtourism.mapper.UserMapper;
 import com.redtourism.service.OrderService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -15,6 +18,9 @@ import java.util.UUID;
 
 @Service
 public class OrderServiceImpl extends ServiceImpl<OrderInfoMapper, OrderInfo> implements OrderService {
+
+    @Autowired
+    private UserMapper userMapper;
 
     @Override
     public OrderInfo createOrder(OrderInfo order) {
@@ -85,7 +91,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderInfoMapper, OrderInfo> im
             wrapper.eq(OrderInfo::getStatus, status);
         }
         wrapper.orderByDesc(OrderInfo::getCreateTime);
-        return page(new Page<>(page, size), wrapper);
+        IPage<OrderInfo> result = page(new Page<>(page, size), wrapper);
+        result.getRecords().forEach(this::fillUsername);
+        return result;
     }
 
     @Override
@@ -98,6 +106,20 @@ public class OrderServiceImpl extends ServiceImpl<OrderInfoMapper, OrderInfo> im
             wrapper.eq(OrderInfo::getStatus, status);
         }
         wrapper.orderByDesc(OrderInfo::getCreateTime);
-        return page(new Page<>(page, size), wrapper);
+        IPage<OrderInfo> result = page(new Page<>(page, size), wrapper);
+        result.getRecords().forEach(this::fillUsername);
+        return result;
+    }
+
+    /** 填充下单人展示名，列表与详情口径一致；用户已被删除时回退为“用户#id” */
+    private void fillUsername(OrderInfo order) {
+        if (order.getUserId() == null) return;
+        User u = userMapper.selectById(order.getUserId());
+        if (u != null) {
+            order.setUsername(u.getNickname() != null && !u.getNickname().isEmpty()
+                    ? u.getNickname() : u.getUsername());
+        } else {
+            order.setUsername("用户#" + order.getUserId());
+        }
     }
 }

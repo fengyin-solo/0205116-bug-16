@@ -285,7 +285,7 @@ function openStoreModal(item) {
 function closeStoreModal() { document.getElementById('storeModal').classList.remove('active'); }
 
 async function editStore(id) {
-    const data = await api('/api/food/store/detail?id=' + id);
+    const data = await api('/api/food/storeDetail?id=' + id);
     if (data) openStoreModal(data);
 }
 
@@ -303,13 +303,13 @@ async function saveStore() {
     const id = document.getElementById('fsId').value;
     if (id) fields.id = id;
     const params = Object.entries(fields).filter(([,v]) => v !== '').map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&');
-    const data = await api('/api/admin/food/store/save?' + params);
+    const data = await api('/api/admin/food/saveStore?' + params);
     if (data !== null) { showToast('保存成功'); closeStoreModal(); loadStores(storePage); }
 }
 
 function deleteStore(id) {
     showConfirm('确定要删除该门店吗？', async () => {
-        const data = await api('/api/admin/food/store/delete?id=' + id);
+        const data = await api('/api/admin/food/deleteStore?id=' + id);
         if (data !== null) { showToast('删除成功'); loadStores(storePage); }
     });
 }

@@ -24,9 +24,10 @@ public class MessageServiceImpl extends ServiceImpl<MessageMapper, Message> impl
     }
 
     @Override
-    public boolean markRead(Long id) {
+    public boolean markRead(Long id, Long userId) {
         Message msg = getById(id);
-        if (msg == null) return false;
+        if (msg == null || !msg.getUserId().equals(userId)) return false;
+        if (msg.getIsRead() != null && msg.getIsRead() == 1) return true;
         msg.setIsRead(1);
         return updateById(msg);
     }

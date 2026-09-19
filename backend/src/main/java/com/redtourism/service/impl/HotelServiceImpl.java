@@ -33,6 +33,11 @@ public class HotelServiceImpl extends ServiceImpl<HotelMapper, Hotel> implements
 
     @Override
     public Hotel getDetail(Long id) {
-        return getById(id);
+        Hotel hotel = getById(id);
+        // 与列表口径一致：下架酒店不对外返回详情
+        if (hotel == null || hotel.getStatus() == null || hotel.getStatus() != 1) {
+            return null;
+        }
+        return hotel;
     }
 }

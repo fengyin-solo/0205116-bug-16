@@ -1,8 +1,9 @@
 package com.redtourism.controller;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
-import com.redtourism.common.Constants;
+import com.redtourism.common.ForbiddenException;
 import com.redtourism.common.Result;
+import com.redtourism.common.SessionUtils;
 import com.redtourism.entity.OrderInfo;
 import com.redtourism.entity.User;
 import com.redtourism.service.OrderService;
@@ -28,8 +29,7 @@ public class OrderController {
                                      @RequestParam(required = false) String checkInDate,
                                      @RequestParam(required = false) String checkOutDate,
                                      HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         OrderInfo order = new OrderInfo();
         order.setUserId(user.getId());
         order.setOrderType(orderType);
@@ -42,8 +42,7 @@ public class OrderController {
 
     @GetMapping("/cancel")
     public Result<String> cancel(@RequestParam Long orderId, HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         orderService.cancelOrder(orderId, user.getId());
         return Result.success("取消成功", null);
     }
@@ -52,16 +51,14 @@ public class OrderController {
     public Result<String> pay(@RequestParam Long orderId,
                                @RequestParam String payMethod,
                                HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         orderService.payOrder(orderId, payMethod, user.getId());
         return Result.success("支付成功（模拟）", null);
     }
 
     @GetMapping("/refund")
     public Result<String> refund(@RequestParam Long orderId, HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         orderService.refundOrder(orderId, user.getId());
         return Result.success("退款成功（模拟）", null);
     }
@@ -72,13 +69,18 @@ public class OrderController {
                                             @RequestParam(required = false) String orderType,
                                             @RequestParam(required = false) String status,
                                             HttpSession session) {
-        User user = (User) session.getAttribute(Constants.SESSION_USER);
-        if (user == null) return Result.error(401, "请先登录");
+        User user = SessionUtils.requireUser(session);
         return Result.success(orderService.listUserOrders(page, size, user.getId(), orderType, status));
     }
 
+    /** 订单详情：仅订单本人可查，访客与其他用户不可见；管理端请走 /api/admin/order/list */
     @GetMapping("/detail")
-    public Result<OrderInfo> detail(@RequestParam Long id) {
-        return Result.success(orderService.getById(id));
+    public Result<OrderInfo> detail(@RequestParam Long id, HttpSession session) {
+        User user = SessionUtils.requireUser(session);
+        OrderInfo order = orderService.getById(id);
+        if (order == null || !order.getUserId().equals(user.getId())) {
+            throw new ForbiddenException("订单不存在或无权查看");
+        }
+        return Result.success(order);
     }
 }

@@ -152,13 +152,13 @@ function updateCategorySelect() {
 async function addCategory() {
     const name = document.getElementById('newCatName').value.trim();
     if (!name) { showToast('请输入分类名称', 'warning'); return; }
-    const data = await api('/api/admin/culture/category/save?name=' + encodeURIComponent(name));
+    const data = await api('/api/admin/culture/saveCategory?name=' + encodeURIComponent(name));
     if (data !== null) { showToast('添加成功'); document.getElementById('newCatName').value = ''; loadCategories(); }
 }
 
 function deleteCategory(id) {
     showConfirm('确定删除该分类吗？该分类下的内容也将受影响。', async () => {
-        const data = await api('/api/admin/culture/category/delete?id=' + encodeURIComponent(id));
+        const data = await api('/api/admin/culture/deleteCategory?id=' + encodeURIComponent(id));
         if (data !== null) { showToast('删除成功'); loadCategories(); }
     });
 }
